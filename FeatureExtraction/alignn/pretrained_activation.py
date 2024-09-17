@@ -129,6 +129,9 @@ all_models = {
         "https://figshare.com/ndownloader/files/31459228",
         1,
     ],
+    "mof_dband": ['',
+        1
+    ]
 }
 parser = argparse.ArgumentParser(
     description="Atomistic Line Graph Neural Network Pretrained Models"
@@ -264,6 +267,8 @@ def get_prediction(
     for i in range(len(substring)):
         if (substring[i].find('vasp') != -1):
             struct_file = substring[i].split('.vasp')[0]
+        if (substring[i].find('cif') != -1):
+            struct_file = substring[i].split('.cif')[0]
 
 
     for i in range(len(act_list_x)):
@@ -315,6 +320,13 @@ if __name__ == "__main__":
     file_path = args.file_path
     file_format = args.file_format
     output_path = args.output_path
+    id_str = file_path.split("/")[-1].split('.')[0].lstrip("POSCAR-") + '.'
+
+    out_files = os.listdir(output_path)
+    matching_files = [file for file in out_files if id_str + '_y.csv' in file]
+    if matching_files:
+        print(f"file {matching_files[0]} exist, skipping")
+        sys.exit()
     cutoff = args.cutoff
     if file_format == "poscar":
         atoms = Atoms.from_poscar(file_path)
@@ -332,4 +344,3 @@ if __name__ == "__main__":
     )
 
     print("Predicted value:", model_name, file_path, out_data)
-
