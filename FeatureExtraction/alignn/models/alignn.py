@@ -18,9 +18,7 @@ from torch.nn import functional as F
 from alignn.models.utils import RBFExpansion
 from alignn.utils import BaseSettings
 
-act_list_x = []
-act_list_y = []
-act_list_z = []
+
 
 class ALIGNNConfig(BaseSettings):
     """Hyperparameter schema for jarvisdgl.models.alignn."""
@@ -266,8 +264,9 @@ class ALIGNN(nn.Module):
         elif config.link == "logit":
             self.link = torch.sigmoid
 
+
     def forward(
-        self, g: Union[Tuple[dgl.DGLGraph, dgl.DGLGraph], dgl.DGLGraph]
+        self, g: Union[Tuple[dgl.DGLGraph, dgl.DGLGraph], dgl.DGLGraph], return_per_graph=False
     ):
         """ALIGNN : start with `atom_features`.
 
@@ -275,7 +274,10 @@ class ALIGNN(nn.Module):
         y: bond features (g.edata and lg.ndata)
         z: angle features (lg.edata)
         """
-        #print('ALIGNN')
+
+        act_list_x = []
+        act_list_y = []
+        act_list_z = []
 
         if len(self.alignn_layers) > 0:
             g, lg = g
@@ -283,58 +285,163 @@ class ALIGNN(nn.Module):
 
             # angle features (fixed)
             z = self.angle_embedding(lg.edata.pop("h"))
-            change_z = torch.mean(z, dim=0)
-            change_z = torch.reshape(change_z, (1, change_z.shape[0]))
-            act_list_z.append(change_z)
+            if return_per_graph:
+                graphs = dgl.unbatch(lg)
+                num_triplets = [gr.num_edges() for gr in graphs]
+                split_z = torch.split(z, num_triplets, dim=0)
+                pooled_z = [torch.mean(zi, dim=0, keepdim=True) for zi in split_z]
+                act_list_z.append(torch.cat(pooled_z, dim=0))
+            else:
+                change_z = torch.mean(z, dim=0, keepdim=True)
+                act_list_z.append(change_z)
 
         g = g.local_var()
 
-        # initial node features: atom feature network...
+        # atom feature network
         x = g.ndata.pop("atom_features")
         x = self.atom_embedding(x)
-        change_x = torch.mean(x, dim=0)
-        change_x = torch.reshape(change_x, (1, change_x.shape[0]))
-        act_list_x.append(change_x)
+        if return_per_graph:
+            graphs = dgl.unbatch(g)
+            num_nodes = [gr.num_nodes() for gr in graphs]
+            split_x = torch.split(x, num_nodes, dim=0)
+            pooled_x = [torch.mean(xi, dim=0, keepdim=True) for xi in split_x]
+            act_list_x.append(torch.cat(pooled_x, dim=0))
+        else:
+            change_x = torch.mean(x, dim=0, keepdim=True)
+            act_list_x.append(change_x)
 
-        # initial bond features
+        # edge features
         bondlength = torch.norm(g.edata.pop("r"), dim=1)
         y = self.edge_embedding(bondlength)
-        change_y = torch.mean(y, dim=0)
-        change_y = torch.reshape(change_y, (1, change_y.shape[0]))
-        act_list_y.append(change_y)
+        if return_per_graph:
+            num_edges = [gr.num_edges() for gr in graphs]
+            split_y = torch.split(y, num_edges, dim=0)
+            pooled_y = [torch.mean(yi, dim=0, keepdim=True) for yi in split_y]
+            act_list_y.append(torch.cat(pooled_y, dim=0))
+        else:
+            change_y = torch.mean(y, dim=0, keepdim=True)
+            act_list_y.append(change_y)
 
-        # ALIGNN updates: update node, edge, triplet features
+        # ALIGNN layers
         for alignn_layer in self.alignn_layers:
             x, y, z = alignn_layer(g, lg, x, y, z)
-            change_x = torch.mean(x, dim=0)
-            change_y = torch.mean(y, dim=0)
-            change_z = torch.mean(z, dim=0)
-            change_x = torch.reshape(change_x, (1, change_x.shape[0]))
-            change_y = torch.reshape(change_y, (1, change_y.shape[0]))
-            change_z = torch.reshape(change_z, (1, change_z.shape[0]))
-            act_list_x.append(change_x)
-            act_list_y.append(change_y)
-            act_list_z.append(change_z)
+            if return_per_graph:
+                split_x = torch.split(x, num_nodes, dim=0)
+                split_y = torch.split(y, num_edges, dim=0)
+                split_z = torch.split(z, num_triplets, dim=0)
+                pooled_x = [torch.mean(xi, dim=0, keepdim=True) for xi in split_x]
+                pooled_y = [torch.mean(yi, dim=0, keepdim=True) for yi in split_y]
+                pooled_z = [torch.mean(zi, dim=0, keepdim=True) for zi in split_z]
+                act_list_x.append(torch.cat(pooled_x, dim=0))
+                act_list_y.append(torch.cat(pooled_y, dim=0))
+                act_list_z.append(torch.cat(pooled_z, dim=0))
+            else:
+                change_x = torch.mean(x, dim=0, keepdim=True)
+                change_y = torch.mean(y, dim=0, keepdim=True)
+                change_z = torch.mean(z, dim=0, keepdim=True)
+                act_list_x.append(change_x)
+                act_list_y.append(change_y)
+                act_list_z.append(change_z)
 
-        # gated GCN updates: update node, edge features
+        # GCN layers
         for gcn_layer in self.gcn_layers:
             x, y = gcn_layer(g, x, y)
-            change_x = torch.mean(x, dim=0)
-            change_y = torch.mean(y, dim=0)
-            change_x = torch.reshape(change_x, (1, change_x.shape[0]))
-            change_y = torch.reshape(change_y, (1, change_y.shape[0]))
-            act_list_x.append(change_x)
-            act_list_y.append(change_y)
+            if return_per_graph:
+                split_x = torch.split(x, num_nodes, dim=0)
+                split_y = torch.split(y, num_edges, dim=0)
+                pooled_x = [torch.mean(xi, dim=0, keepdim=True) for xi in split_x]
+                pooled_y = [torch.mean(yi, dim=0, keepdim=True) for yi in split_y]
+                act_list_x.append(torch.cat(pooled_x, dim=0))
+                act_list_y.append(torch.cat(pooled_y, dim=0))
+            else:
+                change_x = torch.mean(x, dim=0, keepdim=True)
+                change_y = torch.mean(y, dim=0, keepdim=True)
+                act_list_x.append(change_x)
+                act_list_y.append(change_y)
 
         # norm-activation-pool-classify
         h = self.readout(g, x)
-
         out = self.fc(h)
 
         if self.link:
             out = self.link(out)
 
         if self.classification:
-            # out = torch.round(torch.sigmoid(out))
             out = self.softmax(out)
+
         return torch.squeeze(out), act_list_x, act_list_y, act_list_z
+    # def forward(
+    #     self, g: Union[Tuple[dgl.DGLGraph, dgl.DGLGraph], dgl.DGLGraph]
+    # ):
+    #     """ALIGNN : start with `atom_features`.
+
+    #     x: atom features (g.ndata)
+    #     y: bond features (g.edata and lg.ndata)
+    #     z: angle features (lg.edata)
+    #     """
+
+    #     act_list_x = []
+    #     act_list_y = []
+    #     act_list_z = []
+
+    #     if len(self.alignn_layers) > 0:
+    #         g, lg = g
+    #         lg = lg.local_var()
+
+    #         # angle features (fixed)
+    #         z = self.angle_embedding(lg.edata.pop("h"))
+    #         change_z = torch.mean(z, dim=0)
+    #         change_z = torch.reshape(change_z, (1, change_z.shape[0]))
+    #         act_list_z.append(change_z)
+
+    #     g = g.local_var()
+
+    #     # initial node features: atom feature network...
+    #     x = g.ndata.pop("atom_features")
+    #     x = self.atom_embedding(x)
+    #     change_x = torch.mean(x, dim=0)
+    #     change_x = torch.reshape(change_x, (1, change_x.shape[0]))
+    #     act_list_x.append(change_x)
+
+    #     # initial bond features
+    #     bondlength = torch.norm(g.edata.pop("r"), dim=1)
+    #     y = self.edge_embedding(bondlength)
+    #     change_y = torch.mean(y, dim=0)
+    #     change_y = torch.reshape(change_y, (1, change_y.shape[0]))
+    #     act_list_y.append(change_y)
+
+    #     # ALIGNN updates: update node, edge, triplet features
+    #     for alignn_layer in self.alignn_layers:
+    #         x, y, z = alignn_layer(g, lg, x, y, z)
+    #         change_x = torch.mean(x, dim=0)
+    #         change_y = torch.mean(y, dim=0)
+    #         change_z = torch.mean(z, dim=0)
+    #         change_x = torch.reshape(change_x, (1, change_x.shape[0]))
+    #         change_y = torch.reshape(change_y, (1, change_y.shape[0]))
+    #         change_z = torch.reshape(change_z, (1, change_z.shape[0]))
+    #         act_list_x.append(change_x)
+    #         act_list_y.append(change_y)
+    #         act_list_z.append(change_z)
+
+    #     # gated GCN updates: update node, edge features
+    #     for gcn_layer in self.gcn_layers:
+    #         x, y = gcn_layer(g, x, y)
+    #         change_x = torch.mean(x, dim=0)
+    #         change_y = torch.mean(y, dim=0)
+    #         change_x = torch.reshape(change_x, (1, change_x.shape[0]))
+    #         change_y = torch.reshape(change_y, (1, change_y.shape[0]))
+    #         act_list_x.append(change_x)
+    #         act_list_y.append(change_y)
+
+    #     # norm-activation-pool-classify
+    #     h = self.readout(g, x)
+
+    #     out = self.fc(h)
+
+    #     if self.link:
+    #         out = self.link(out)
+
+    #     if self.classification:
+    #         # out = torch.round(torch.sigmoid(out))
+    #         out = self.softmax(out)
+    #     return torch.squeeze(out), act_list_x, act_list_y, act_list_z
