@@ -13,3 +13,12 @@ for filename in /scratch/yll6162/atomgpt/structure/*.vasp; do
             --output_path "/data/yll6162/activation_runtime"
     fi
 done
+
+
+
+
+python alignn/pretrained_activation_all.py \
+    --model_name mp_e_form_alignnn \
+    --file_format poscar \
+    --file_path "/scratch/yll6162/atomgpt/structure/" \
+    --output_path "/data/yll6162/activation_runtime"
